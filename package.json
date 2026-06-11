@@ -1,0 +1,63 @@
+{
+  "name": "rewind-view",
+  "version": "1.0.1",
+  "description": "Index and browse AI assistant sessions (Claude, Codex, OpenCode, Antigravity) from the command line or a local web UI.",
+  "main": "dist/index.js",
+  "bin": {
+    "rewind": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && cp src/index.html dist/index.html",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "serve": "node dist/cli.js serve",
+    "verify:pricing": "npm run build && node dist/verify-pricing.js",
+    "prepublishOnly": "npm run build",
+    "pkg": "pkg . --targets node18-macos-x64,node18-macos-arm64,node18-linux-x64,node18-linux-arm64,node18-win-x64 --output dist/rewind"
+  },
+  "keywords": [
+    "rewind",
+    "session",
+    "viewer",
+    "claude",
+    "codex",
+    "search",
+    "ai",
+    "assistant"
+  ],
+  "files": [
+    "dist/**/*",
+    "README.md"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "express": "^4.18.2",
+    "open": "^8.4.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "pkg": "^5.8.1",
+    "typescript": "^5.3.3"
+  },
+  "pkg": {
+    "assets": [
+      "dist/index.html"
+    ],
+    "scripts": [
+      "dist/**/*.js"
+    ],
+    "targets": [
+      "node18-macos-x64",
+      "node18-macos-arm64",
+      "node18-linux-x64",
+      "node18-linux-arm64",
+      "node18-win-x64"
+    ]
+  }
+}
