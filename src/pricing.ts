@@ -79,6 +79,7 @@ export class PricingEngine {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.ensureTables();
+    this.migrateSchema();
     this.cacheStmts = this.prepareStatements();
   }
 
@@ -117,6 +118,63 @@ export class PricingEngine {
       CREATE INDEX IF NOT EXISTS idx_usage_log_model ON usage_log(model);
       CREATE INDEX IF NOT EXISTS idx_usage_log_logged_at ON usage_log(logged_at);
     `);
+  }
+
+  private migrateSchema(): void {
+    const expectedPricing: Array<{ name: string; def: string }> = [
+      { name: "model_name", def: "TEXT PRIMARY KEY" },
+      { name: "provider", def: "TEXT" },
+      { name: "input_cost_per_token", def: "REAL DEFAULT 0" },
+      { name: "output_cost_per_token", def: "REAL DEFAULT 0" },
+      { name: "output_cost_per_reasoning_token", def: "REAL DEFAULT 0" },
+      { name: "cache_read_input_token_cost", def: "REAL DEFAULT 0" },
+      { name: "cache_creation_input_token_cost", def: "REAL DEFAULT 0" },
+      { name: "cache_creation_input_token_cost_above_1hr", def: "REAL DEFAULT 0" },
+      { name: "max_input_tokens", def: "INTEGER DEFAULT 0" },
+      { name: "max_output_tokens", def: "INTEGER DEFAULT 0" },
+      { name: "supports_reasoning", def: "INTEGER DEFAULT 0" },
+      { name: "supports_vision", def: "INTEGER DEFAULT 0" },
+      { name: "supports_function_calling", def: "INTEGER DEFAULT 0" },
+      { name: "supports_prompt_caching", def: "INTEGER DEFAULT 0" },
+      { name: "raw_json", def: "TEXT" },
+      { name: "fetched_at", def: "INTEGER NOT NULL" },
+    ];
+
+    const expectedUsage: Array<{ name: string; def: string }> = [
+      { name: "id", def: "INTEGER PRIMARY KEY AUTOINCREMENT" },
+      { name: "model", def: "TEXT NOT NULL" },
+      { name: "input_tokens", def: "INTEGER NOT NULL DEFAULT 0" },
+      { name: "output_tokens", def: "INTEGER NOT NULL DEFAULT 0" },
+      { name: "reasoning_tokens", def: "INTEGER NOT NULL DEFAULT 0" },
+      { name: "cost", def: "REAL NOT NULL DEFAULT 0" },
+      { name: "label", def: "TEXT" },
+      { name: "logged_at", def: "INTEGER NOT NULL" },
+    ];
+
+    const migrateTable = (
+      tableName: string,
+      expected: Array<{ name: string; def: string }>,
+    ) => {
+      const existing = this.db
+        .prepare(`PRAGMA table_info(${tableName})`)
+        .all() as Array<{ name: string }>;
+      const existingNames = new Set(existing.map((c) => c.name));
+
+      for (const col of expected) {
+        if (!existingNames.has(col.name)) {
+          try {
+            this.db.exec(
+              `ALTER TABLE ${tableName} ADD COLUMN ${col.name} ${col.def}`,
+            );
+          } catch {
+            // column already exists or table missing — skip
+          }
+        }
+      }
+    };
+
+    migrateTable("pricing_cache", expectedPricing);
+    migrateTable("usage_log", expectedUsage);
   }
 
   private prepareStatements() {
@@ -476,9 +534,15 @@ export class PricingEngine {
    */
   getUsageStats(): {
     totalCost: number;
+    total_cost: number;
     totalInputTokens: number;
+    total_input_tokens: number;
     totalOutputTokens: number;
+    total_output_tokens: number;
     totalReasoningTokens: number;
+    total_reasoning_tokens: number;
+    avgCostPerRequest: number;
+    entryCount: number;
     byModel: Record<
       string,
       {
@@ -509,6 +573,7 @@ export class PricingEngine {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalReasoningTokens = 0;
+    let entryCount = 0;
 
     for (const row of rows) {
       byModel[row.model] = {
@@ -522,14 +587,118 @@ export class PricingEngine {
       totalInputTokens += row.total_input_tokens;
       totalOutputTokens += row.total_output_tokens;
       totalReasoningTokens += row.total_reasoning_tokens;
+      entryCount += row.requests;
     }
 
     return {
       totalCost,
+      total_cost: totalCost,
       totalInputTokens,
+      total_input_tokens: totalInputTokens,
       totalOutputTokens,
+      total_output_tokens: totalOutputTokens,
       totalReasoningTokens,
+      total_reasoning_tokens: totalReasoningTokens,
+      avgCostPerRequest: entryCount > 0 ? totalCost / entryCount : 0,
+      entryCount,
       byModel,
+    };
+  }
+
+  getCostsSummary(): {
+    status: "ok" | "unavailable";
+    totalCost: number;
+    total_cost: number;
+    entryCount: number;
+    avgCostPerRequest: number;
+    byModel: Record<
+      string,
+      {
+        cost: number;
+        input_tokens: number;
+        output_tokens: number;
+        reasoning_tokens: number;
+        requests: number;
+        avg_cost_per_request: number;
+      }
+    >;
+    dailyBreakdown: Array<{
+      date: string;
+      cost: number;
+      entries: number;
+    }>;
+    last30DaysCost: number;
+    pricingCacheStatus: "fresh" | "stale" | "empty";
+    pricingCacheAge: number | null;
+  } {
+    const stats = this.getUsageStats();
+
+    const cacheRow = this.cacheStmts.getFetchedAt.get() as
+      | { fetched_at: number }
+      | undefined;
+
+    let pricingCacheStatus: "fresh" | "stale" | "empty" = "empty";
+    let pricingCacheAge: number | null = null;
+    if (cacheRow) {
+      pricingCacheAge = Date.now() - cacheRow.fetched_at;
+      pricingCacheStatus =
+        pricingCacheAge < CACHE_TTL_MS ? "fresh" : "stale";
+    }
+
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const dailyRows = this.db
+      .prepare(
+        `SELECT
+           DATE(logged_at / 1000, 'unixepoch', 'localtime') as date,
+           SUM(cost) as cost,
+           COUNT(*) as entries
+         FROM usage_log
+         WHERE logged_at >= :since
+         GROUP BY date
+         ORDER BY date ASC`,
+      )
+      .all({ since: thirtyDaysAgo }) as Array<{
+      date: string;
+      cost: number;
+      entries: number;
+    }>;
+
+    let last30DaysCost = 0;
+    for (const row of dailyRows) {
+      last30DaysCost += row.cost;
+    }
+
+    const byModelWithAvg: Record<
+      string,
+      {
+        cost: number;
+        input_tokens: number;
+        output_tokens: number;
+        reasoning_tokens: number;
+        requests: number;
+        avg_cost_per_request: number;
+      }
+    > = {};
+
+    for (const [model, data] of Object.entries(stats.byModel)) {
+      byModelWithAvg[model] = {
+        ...data,
+        avg_cost_per_request:
+          data.requests > 0 ? data.cost / data.requests : 0,
+      };
+    }
+
+    return {
+      status: stats.entryCount > 0 ? "ok" : "unavailable",
+      totalCost: stats.totalCost,
+      total_cost: stats.total_cost,
+      entryCount: stats.entryCount,
+      avgCostPerRequest: stats.avgCostPerRequest,
+      byModel: byModelWithAvg,
+      dailyBreakdown: dailyRows,
+      last30DaysCost,
+      pricingCacheStatus,
+      pricingCacheAge,
     };
   }
 

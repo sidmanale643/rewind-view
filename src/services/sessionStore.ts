@@ -4,7 +4,7 @@
  * Using better-sqlite3 for a synchronous, native SQLite (with FTS5 support).
  */
 
-import { readFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, statSync } from "fs";
 import { join, resolve, dirname, sep } from "path";
 import { execSync } from "child_process";
 import Database from "better-sqlite3";
@@ -231,6 +231,11 @@ export interface Stats {
   byProvider: Record<string, number>;
   byStatus: Record<string, number>;
   ftsRows: number;
+  messageCount?: number;
+  totalTokens?: number;
+  activity?: { date: string; count: number; tokens: number }[];
+  models?: { model: string; tokens: number; sessions: number }[];
+  topRepos?: { path: string; sessions: number; tokens: number }[];
 }
 
 export class SessionStore {
@@ -341,6 +346,42 @@ export class SessionStore {
     return !(
       row.status === "indexed" && row.indexed_content_hash === contentHash
     );
+  }
+
+  isSourceUnchanged(
+    provider: string,
+    sourcePath: string,
+    mtimeNs: bigint,
+    sizeBytes: number,
+    force: boolean = false,
+  ): boolean {
+    if (force) return false;
+    const row = this.db
+      .prepare(
+        `SELECT status, source_mtime_ns, source_size_bytes, indexed_content_hash
+         FROM seen_sessions
+         WHERE provider = :provider AND source_path = :source_path`,
+      )
+      .get({ provider, source_path: sourcePath }) as
+      | {
+          status: string;
+          source_mtime_ns: string | number | null;
+          source_size_bytes: number | null;
+          indexed_content_hash: string | null;
+        }
+      | undefined;
+
+    if (!row || row.status !== "indexed" || !row.indexed_content_hash) {
+      return false;
+    }
+    const storedMtimeRaw = String(row.source_mtime_ns ?? "0");
+    const storedMtime = /^[0-9]+$/.test(storedMtimeRaw)
+      ? BigInt(storedMtimeRaw)
+      : BigInt(Math.trunc(Number(storedMtimeRaw) || 0));
+    const delta =
+      storedMtime > mtimeNs ? storedMtime - mtimeNs : mtimeNs - storedMtime;
+
+    return Number(row.source_size_bytes ?? -1) === sizeBytes && delta <= 1_000_000n;
   }
 
   // ------------------------------------------------------------------
@@ -456,6 +497,35 @@ export class SessionStore {
       }
     });
     tx(params);
+  }
+
+  pruneMissingSources(provider: string, sourcePaths: string[]): number {
+    if (sourcePaths.length === 0) return 0;
+
+    const tx = this.db.transaction((paths: string[]) => {
+      this.db.exec("CREATE TEMP TABLE IF NOT EXISTS current_source_paths(path TEXT PRIMARY KEY)");
+      this.db.prepare("DELETE FROM current_source_paths").run();
+
+      const insertPath = this.db.prepare(
+        "INSERT OR IGNORE INTO current_source_paths(path) VALUES (?)",
+      );
+      for (const path of paths) {
+        insertPath.run(path);
+      }
+
+      const result = this.db
+        .prepare(
+          `DELETE FROM seen_sessions
+           WHERE provider = ?
+             AND source_path NOT IN (SELECT path FROM current_source_paths)`,
+        )
+        .run(provider);
+
+      this.db.prepare("DELETE FROM current_source_paths").run();
+      return result.changes;
+    });
+
+    return tx(sourcePaths);
   }
 
   markIndexed(
@@ -875,7 +945,16 @@ export class SessionStore {
       return ""; // Transcript fallback not supported for OpenCode virtual paths
     }
 
+    if (provider === "antigravity") {
+      sourcePath = join(sourcePath, ".system_generated", "logs", "transcript.jsonl");
+    }
+
     if (!existsSync(sourcePath)) return "";
+    try {
+      if (!statSync(sourcePath).isFile()) return "";
+    } catch {
+      return "";
+    }
     try {
       const content = readFileSync(sourcePath, "utf-8");
       const parts: string[] = [];
@@ -1057,11 +1136,110 @@ export class SessionStore {
       .prepare("SELECT COUNT(*) as count FROM session_fts")
       .get() as { count: number };
 
+    const agg = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(message_count), 0) as messages, " +
+        "COALESCE(SUM(total_tokens), 0) as total_tokens, " +
+        "COALESCE(SUM(input_tokens), 0) as input_tokens, " +
+        "COALESCE(SUM(output_tokens), 0) as output_tokens " +
+        "FROM seen_sessions",
+      )
+      .get() as {
+        messages: number;
+        total_tokens: number;
+        input_tokens: number;
+        output_tokens: number;
+      };
+
+    const activity = this.db
+      .prepare(
+        `SELECT
+           date(session_last_message_at) as date,
+           COUNT(*) as count,
+           COALESCE(SUM(total_tokens), 0) as total_tokens,
+           COALESCE(SUM(input_tokens), 0) as input_tokens,
+           COALESCE(SUM(output_tokens), 0) as output_tokens
+         FROM seen_sessions
+         WHERE session_last_message_at IS NOT NULL
+         GROUP BY date(session_last_message_at)
+         ORDER BY date(session_last_message_at) ASC`,
+      )
+      .all() as {
+        date: string;
+        count: number;
+        total_tokens: number;
+        input_tokens: number;
+        output_tokens: number;
+      }[];
+
+    const models = this.db
+      .prepare(
+        `SELECT
+           COALESCE(NULLIF(model, ''), 'unknown') as model,
+           COALESCE(SUM(total_tokens), 0) as total_tokens,
+           COALESCE(SUM(input_tokens), 0) as input_tokens,
+           COALESCE(SUM(output_tokens), 0) as output_tokens,
+           COUNT(*) as sessions
+         FROM seen_sessions
+         GROUP BY model
+         ORDER BY COALESCE(SUM(total_tokens), 0) DESC, sessions DESC
+         LIMIT 20`,
+      )
+      .all() as {
+        model: string;
+        total_tokens: number;
+        input_tokens: number;
+        output_tokens: number;
+        sessions: number;
+      }[];
+
+    const topRepos = this.db
+      .prepare(
+        `SELECT
+           COALESCE(NULLIF(repo_root, ''), NULLIF(cwd, ''), 'unknown') as path,
+           COUNT(*) as sessions,
+           COALESCE(SUM(total_tokens), 0) as total_tokens,
+           COALESCE(SUM(input_tokens), 0) as input_tokens,
+           COALESCE(SUM(output_tokens), 0) as output_tokens
+         FROM seen_sessions
+         GROUP BY path
+         ORDER BY sessions DESC, COALESCE(SUM(total_tokens), 0) DESC
+         LIMIT 8`,
+      )
+      .all() as {
+        path: string;
+        sessions: number;
+        total_tokens: number;
+        input_tokens: number;
+        output_tokens: number;
+      }[];
+
     return {
       total,
       byProvider,
       byStatus,
       ftsRows: ftsResult.count,
+      messageCount: agg.messages,
+      totalTokens:
+        agg.total_tokens || (agg.input_tokens + agg.output_tokens) || 0,
+      activity: activity.map((row) => ({
+        date: row.date,
+        count: row.count,
+        tokens:
+          row.total_tokens || (row.input_tokens + row.output_tokens) || 0,
+      })),
+      models: models.map((row) => ({
+        model: row.model,
+        tokens:
+          row.total_tokens || (row.input_tokens + row.output_tokens) || 0,
+        sessions: row.sessions,
+      })),
+      topRepos: topRepos.map((row) => ({
+        path: row.path,
+        sessions: row.sessions,
+        tokens:
+          row.total_tokens || (row.input_tokens + row.output_tokens) || 0,
+      })),
     };
   }
 
@@ -1224,5 +1402,42 @@ export class SessionStore {
       .prepare("DELETE FROM shared_sessions WHERE expires_at <= :now")
       .run({ now });
     return result.changes;
+  }
+
+  /**
+   * Aggregate session token data grouped by model for cost estimation.
+   * Returns per-model totals of all token fields plus session counts.
+   */
+  getSessionCosts(): Array<{
+    model: string;
+    provider: string;
+    session_count: number;
+    input_tokens: number;
+    output_tokens: number;
+    cached_input_tokens: number;
+    cache_creation_tokens: number;
+    cache_creation_1h_tokens: number;
+    reasoning_tokens: number;
+    total_tokens: number;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT
+           COALESCE(NULLIF(model, ''), 'unknown') as model,
+           provider,
+           COUNT(*) as session_count,
+           COALESCE(SUM(input_tokens), 0) as input_tokens,
+           COALESCE(SUM(output_tokens), 0) as output_tokens,
+           COALESCE(SUM(cached_input_tokens), 0) as cached_input_tokens,
+           COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
+           COALESCE(SUM(cache_creation_1h_tokens), 0) as cache_creation_1h_tokens,
+           COALESCE(SUM(reasoning_tokens), 0) as reasoning_tokens,
+           COALESCE(SUM(total_tokens), 0) as total_tokens
+         FROM seen_sessions
+         WHERE model IS NOT NULL AND model != ''
+         GROUP BY model, provider
+         ORDER BY COALESCE(SUM(total_tokens), 0) DESC`,
+      )
+      .all() as any[];
   }
 }
