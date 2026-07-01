@@ -7,360 +7,99 @@
 import express, { Request, Response, NextFunction } from "express";
 import { join } from "path";
 import { readFileSync, existsSync } from "fs";
+import { networkInterfaces } from "os";
 import { SessionStore } from "./services/sessionStore";
+import { Indexer } from "./indexer";
 import { PricingEngine } from "./pricing";
 import { DEFAULT_DATA_DIR } from "./utils";
+import { buildHandoffPacket, defaultHandoffDir, isHandoffTarget } from "./handoff";
+import { readTranscript } from "./transcript";
 
-// Helper: Read OpenCode transcript from SQLite
-function readOpenCodeTranscript(sourcePath: string): any[] {
-  // sourcePath is "db_path?session=session_id"
-  const dbPath = sourcePath.split("?session=")[0];
-  const sessionId = sourcePath.includes("session=") ? sourcePath.split("session=")[1] : "";
-
-  if (!existsSync(dbPath)) {
-    return [{ role: "error", text: `file not found: ${dbPath}`, ts: null }];
-  }
-
-  if (!sessionId) {
-    return [{ role: "error", text: "no session id in source path", ts: null }];
-  }
-
-  let Database: any;
-  try {
-    Database = require("better-sqlite3");
-  } catch {
-    return [{ role: "error", text: "better-sqlite3 not available", ts: null }];
-  }
-
-  let db: any;
-  try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true });
-
-    const messages = db
-      .prepare(`SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC`)
-      .all(sessionId);
-
-    const parts = db
-      .prepare(`SELECT id, message_id, data FROM part WHERE session_id = ? ORDER BY time_created ASC`)
-      .all(sessionId);
-
-    // Group parts by message_id
-    const partsByMsg = new Map<string, any[]>();
-    for (const part of parts) {
-      const list = partsByMsg.get(part.message_id) || [];
-      list.push(part);
-      partsByMsg.set(part.message_id, list);
-    }
-
-    const result: any[] = [];
-    for (const msg of messages) {
-      let msgData: any;
-      try { msgData = JSON.parse(msg.data); } catch { continue; }
-
-      const role = msgData.role;
-      if (role !== "user" && role !== "assistant") continue;
-
-      const msgParts = partsByMsg.get(msg.id) || [];
-      const texts: string[] = [];
-
-      for (const part of msgParts) {
-        let pData: any;
-        try { pData = JSON.parse(part.data); } catch { continue; }
-
-        if (pData.type === "text") {
-          const text = pData.text || "";
-          if (text.trim()) texts.push(text.trim());
-        } else if (pData.type === "tool") {
-          const name = pData.tool || "unknown";
-          const state = pData.state || {};
-          const inp = state.input || {};
-          const output = state.output;
-
-          const lines = [`[tool: ${name}]`];
-          if (typeof inp === "object" && inp !== null) {
-            for (const [k, v] of Object.entries(inp)) {
-              if (v === null) continue;
-              const val = String(v).trim();
-              lines.push(`  ${k}: ${val.length > 500 ? val.substring(0, 497) + "..." : val}`);
-            }
-          }
-          if (output !== undefined && output !== null) {
-            const trimmed = String(output).trim();
-            lines.push(`  => ${trimmed.length > 1000 ? trimmed.substring(0, 997) + "..." : trimmed}`);
-          }
-          texts.push(lines.join("\n"));
-        }
-      }
-
-      const text = texts.join("\n");
-      if (!text.trim()) continue;
-
-      let ts: string | null = null;
-      if (msg.time_created) {
-        try { ts = new Date(Math.floor(msg.time_created / 1000)).toISOString(); } catch {}
-      }
-
-      result.push({ role, text: text.trim(), ts });
-    }
-
-    return result;
-  } catch (exc) {
-    return [{ role: "error", text: exc instanceof Error ? exc.message : String(exc), ts: null }];
-  } finally {
-    if (db) db.close();
-  }
+function normalizeBaseUrl(url: string | null | undefined): string {
+  return (url || "").replace(/\/+$/, "");
 }
 
-// Helper: Read transcript from source file
-function readTranscript(sourcePath: string, provider: string): any[] {
-  // OpenCode sessions are stored in SQLite, not as plain files
-  if (provider === "opencode") {
-    return readOpenCodeTranscript(sourcePath);
-  }
-
-  const path = sourcePath;
-
-  if (!existsSync(path)) {
-    return [{ role: "error", text: `file not found: ${path}`, ts: null }];
-  }
-
-  try {
-    const content = readFileSync(path, "utf-8");
-    const messages: any[] = [];
-    const pendingTools = new Map<string, any>();
-
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-
-      let obj: any;
-      try {
-        obj = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
-
-      let timestamp: string | null = null;
-      const tsRaw = obj.timestamp;
-      if (typeof tsRaw === "string") {
-        try {
-          timestamp = new Date(tsRaw).toISOString();
-        } catch {
-          // Invalid date
-        }
-      }
-
-      if (provider === "codex") {
-        const eventType = obj.type;
-        const payload = obj.payload || {};
-
-        if (eventType === "response_item") {
-          const itemType = payload.type;
-          const role = payload.role;
-
-          if (
-            itemType === "message" &&
-            ["user", "assistant", "developer"].includes(role)
-          ) {
-            const text = extractText(payload);
-            if (!text.trim()) continue;
-
-            const displayRole = role === "developer" ? "system" : role;
-            messages.push({
-              role: displayRole,
-              text: text.trim(),
-              ts: timestamp,
-            });
-          } else if (itemType === "function_call") {
-            const name = payload.name || "unknown";
-            const args = payload.arguments || "{}";
-            messages.push({
-              role: "assistant",
-              text: formatFunctionCall(name, args, null),
-              ts: timestamp,
-            });
-          } else if (itemType === "function_call_output") {
-            const output = payload.output || "";
-            messages.push({
-              role: "assistant",
-              text: formatFunctionCall("", "", output),
-              ts: timestamp,
-            });
-          }
-        } else if (eventType === "session_meta") {
-          const baseInstructions = payload.base_instructions || {};
-          const systemText = baseInstructions.text || "";
-          if (systemText) {
-            messages.push({ role: "system", text: systemText, ts: timestamp });
-          }
-        }
-      } else {
-        // Claude format
-        let role = obj.type;
-        let text = "";
-
-        if (obj.message && typeof obj.message === "object") {
-          role = obj.message.role || role;
-          const messageContent = obj.message.content;
-
-          if (typeof messageContent === "string") {
-            text = messageContent;
-          } else if (Array.isArray(messageContent)) {
-            const parts: string[] = [];
-
-            for (const block of messageContent) {
-              if (!block || typeof block !== "object") continue;
-
-              const btype = block.type;
-
-              if (btype === "text") {
-                parts.push(block.text || "");
-              } else if (btype === "tool_use") {
-                pendingTools.set(block.id, block);
-                parts.push(formatToolCall(block, null));
-              } else if (btype === "tool_result") {
-                const toolBlock = pendingTools.get(block.tool_use_id);
-                const inner = block.content || "";
-
-                let out = "";
-                if (typeof inner === "string") {
-                  out = inner;
-                } else if (Array.isArray(inner)) {
-                  for (const sub of inner) {
-                    if (
-                      sub &&
-                      typeof sub === "object" &&
-                      ["text", "input_text", "output_text"].includes(sub.type)
-                    ) {
-                      out += sub.text || "";
-                    }
-                  }
-                }
-
-                if (toolBlock) {
-                  parts.push(formatToolCall(toolBlock, out));
-                  pendingTools.delete(block.tool_use_id);
-                } else if (out) {
-                  parts.push(out);
-                }
-              }
-            }
-
-            text = parts.join("\n");
-          }
-        } else if (typeof obj.content === "string") {
-          text = obj.content;
-        }
-
-        if (role && ["user", "assistant"].includes(role) && text.trim()) {
-          messages.push({ role, text: text.trim(), ts: timestamp });
-        }
-      }
-    }
-
-    return messages;
-  } catch (exc) {
-    return [
-      {
-        role: "error",
-        text: exc instanceof Error ? exc.message : String(exc),
-        ts: null,
-      },
-    ];
-  }
+function firstHeaderValue(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.split(",")[0].trim() || null;
 }
 
-function extractText(payload: any): string {
-  const content = payload.content || "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const texts: string[] = [];
-    for (const block of content) {
-      if (block && typeof block === "object") {
-        const btype = block.type;
-        if (["text", "input_text", "output_text"].includes(btype)) {
-          texts.push(block.text || "");
-        }
-      }
-    }
-    return texts.join("\n");
-  }
-  return "";
+function isLocalHost(host: string): boolean {
+  const hostname = host.startsWith("[")
+    ? host.slice(1, host.indexOf("]"))
+    : host.split(":")[0].toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1"
+  );
 }
 
-function formatFunctionCall(
-  name: string,
-  argsStr: string,
-  output: string | null,
-): string {
-  const lines: string[] = [`[tool: ${name}]`];
-
-  try {
-    const args = JSON.parse(argsStr);
-    if (typeof args === "object" && args !== null) {
-      for (const [k, v] of Object.entries(args)) {
-        if (v === null) continue;
-        const val = String(v).trim();
-        lines.push(
-          `  ${k}: ${val.length > 500 ? val.substring(0, 497) + "..." : val}`,
-        );
+function firstLanIpv4(): string | null {
+  for (const interfaces of Object.values(networkInterfaces())) {
+    for (const address of interfaces || []) {
+      if (address.family === "IPv4" && !address.internal) {
+        return address.address;
       }
     }
-  } catch {
-    // Ignore parse errors
   }
-
-  if (output !== null && output !== undefined) {
-    const trimmed = output.trim();
-    lines.push(
-      `  => ${trimmed.length > 1000 ? trimmed.substring(0, 997) + "..." : trimmed}`,
-    );
-  }
-
-  return lines.join("\n");
-}
-
-function formatToolCall(block: any, outputText: string | null): string {
-  const name = block.name || "unknown";
-  const inp = block.input || {};
-  const lines: string[] = [`[tool: ${name}]`];
-
-  if (typeof inp === "object" && inp !== null) {
-    for (const [k, v] of Object.entries(inp)) {
-      if (v === null) continue;
-      const val = String(v).trim();
-      lines.push(
-        `  ${k}: ${val.length > 500 ? val.substring(0, 497) + "..." : val}`,
-      );
-    }
-  }
-
-  if (outputText !== null) {
-    const outStr = outputText.trim();
-    lines.push(
-      `  => ${outStr.length > 1000 ? outStr.substring(0, 997) + "..." : outStr}`,
-    );
-  }
-
-  return lines.join("\n");
+  return null;
 }
 
 export function startServer(options?: {
   port?: number | string;
+  host?: string;
   dataDir?: string;
+  publicUrl?: string;
 }): Promise<{ port: number; close: () => void }> {
-  const port = options?.port ?? process.env.PORT ?? 3000;
+  const port = options?.port ?? process.env.PORT ?? 4820;
+  const host = options?.host ?? process.env.HOST ?? "0.0.0.0";
   const dataDir = options?.dataDir ?? process.env.DATA_DIR ?? DEFAULT_DATA_DIR;
+  const publicUrl = normalizeBaseUrl(options?.publicUrl ?? process.env.PUBLIC_URL);
 
   const app = express();
+  app.set("trust proxy", true);
 
   let store: SessionStore | null = null;
+  let reindexPromise: Promise<any> | null = null;
 
   function getStore(): SessionStore {
     if (!store) {
       store = new SessionStore(dataDir);
     }
     return store;
+  }
+
+  function getShareBaseUrl(req: Request): string {
+    if (publicUrl) return publicUrl;
+
+    const forwardedHost = firstHeaderValue(req.get("x-forwarded-host"));
+    const forwardedProto = firstHeaderValue(req.get("x-forwarded-proto"));
+    const hostHeader = forwardedHost || req.get("host") || "";
+    const proto = forwardedProto || req.protocol || "http";
+
+    if (hostHeader && isLocalHost(hostHeader)) {
+      const lanIp = firstLanIpv4();
+      if (lanIp) {
+        const port = hostHeader.includes(":") ? hostHeader.split(":").pop() : "";
+        return `${proto}://${lanIp}${port ? `:${port}` : ""}`;
+      }
+    }
+
+    return hostHeader ? `${proto}://${hostHeader}` : "";
+  }
+
+  function renderIndexHtml(req: Request, shareToken?: string): string {
+    const htmlPath = join(__dirname, "index.html");
+    let html = readFileSync(htmlPath, "utf-8");
+    const baseUrl = getShareBaseUrl(req);
+    const script = [
+      "<script>",
+      shareToken ? `window.SHARE_TOKEN = ${JSON.stringify(shareToken)};` : "",
+      baseUrl ? `window.PUBLIC_URL = ${JSON.stringify(baseUrl)};` : "",
+      "</script>",
+    ].join("");
+    return html.replace("<!-- SHARE_INJECTION_POINT -->", script);
   }
 
   // Middleware
@@ -373,7 +112,7 @@ export function startServer(options?: {
     if (!existsSync(htmlPath)) {
       return res.status(404).send("HTML interface not found");
     }
-    res.send(readFileSync(htmlPath, "utf-8"));
+    res.send(renderIndexHtml(req));
   });
 
   // Also serve root path
@@ -386,6 +125,48 @@ export function startServer(options?: {
     try {
       const stats = await getStore().getStats();
       res.json(stats);
+    } catch (exc) {
+      res
+        .status(500)
+        .json({ error: exc instanceof Error ? exc.message : String(exc) });
+    }
+  });
+
+  // API: Re-index every provider session, ignoring cached transcript hashes.
+  app.post("/api/index/rebuild", async (req: Request, res: Response) => {
+    if (reindexPromise) {
+      return res.status(409).json({ error: "Reindex already in progress" });
+    }
+
+    const indexer = new Indexer(dataDir);
+    const startedAt = new Date().toISOString();
+    reindexPromise = indexer
+      .indexAll({ force: true })
+      .finally(() => {
+        indexer.close();
+        reindexPromise = null;
+      });
+
+    try {
+      const results = await reindexPromise;
+      const totals = results.reduce(
+        (acc: any, result: any) => {
+          acc.discovered += result.discovered || 0;
+          acc.indexed += result.indexed || 0;
+          acc.skipped += result.skipped || 0;
+          acc.failed += result.failed || 0;
+          return acc;
+        },
+        { discovered: 0, indexed: 0, skipped: 0, failed: 0 },
+      );
+
+      res.json({
+        ok: totals.failed === 0,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        totals,
+        results,
+      });
     } catch (exc) {
       res
         .status(500)
@@ -474,6 +255,40 @@ export function startServer(options?: {
     },
   );
 
+  // API: Build a Markdown handoff packet
+  app.post(
+    "/api/sessions/:sessionId/handoff",
+    async (req: Request, res: Response) => {
+      try {
+        const target = req.body?.target;
+        if (!isHandoffTarget(target)) {
+          return res.status(400).json({ error: "target must be claude or codex" });
+        }
+
+        const row = await getStore().get(req.params.sessionId);
+        if (!row) {
+          return res.status(404).json({ error: "Session not found" });
+        }
+
+        const messages =
+          req.body?.messages === undefined
+            ? undefined
+            : Number(req.body.messages);
+        res.json(
+          buildHandoffPacket(row, {
+            target,
+            messages,
+            handoffDir: defaultHandoffDir(target, row.id),
+          }),
+        );
+      } catch (exc) {
+        res
+          .status(500)
+          .json({ error: exc instanceof Error ? exc.message : String(exc) });
+      }
+    },
+  );
+
   // API: Create share link for a session
   app.post(
     "/api/sessions/:sessionId/share",
@@ -487,9 +302,11 @@ export function startServer(options?: {
         if (!result) {
           return res.status(404).json({ error: "Session not found" });
         }
+        const baseUrl = getShareBaseUrl(req);
         res.json({
           share_token: result.shareToken,
           share_url: `/shared/${result.shareToken}`,
+          share_full_url: baseUrl ? `${baseUrl}/shared/${result.shareToken}` : null,
           expires_at: result.expiresAt,
         });
       } catch (exc) {
@@ -553,14 +370,7 @@ export function startServer(options?: {
           );
       }
 
-      const htmlPath = join(__dirname, "index.html");
-      let html = readFileSync(htmlPath, "utf-8");
-      // Inject share token for frontend
-      html = html.replace(
-        "<!-- SHARE_INJECTION_POINT -->",
-        `<script>window.SHARE_TOKEN = "${req.params.token}";</script>`,
-      );
-      res.send(html);
+      res.send(renderIndexHtml(req, req.params.token));
     } catch (exc) {
       res
         .status(500)
@@ -707,7 +517,94 @@ export function startServer(options?: {
       const limit = parseInt(req.query.limit as string, 10) || 100;
       const history = engine.getUsageHistory(limit);
       const stats = engine.getUsageStats();
-      res.json({ history, stats });
+      res.json({
+        status: history.length > 0 ? "ok" : "unavailable",
+        history,
+        stats,
+      });
+    } catch (exc) {
+      res
+        .status(500)
+        .json({ error: exc instanceof Error ? exc.message : String(exc) });
+    }
+  });
+
+  // API: Costs summary
+  app.get("/api/pricing/costs", (req: Request, res: Response) => {
+    try {
+      const engine = getPricing();
+      const summary = engine.getCostsSummary();
+      res.json(summary);
+    } catch (exc) {
+      res.status(500).json({
+        status: "unavailable",
+        error: exc instanceof Error ? exc.message : String(exc),
+      });
+    }
+  });
+
+  // API: Cost estimates computed from indexed session data
+  app.get("/api/costs/from-sessions", async (req: Request, res: Response) => {
+    try {
+      const engine = getPricing();
+      await engine.ensurePricingData();
+      const sessionCosts = getStore().getSessionCosts();
+
+      const models = sessionCosts.map((sc) => {
+        const convention =
+          sc.provider === "claude" ? "excludes_cache" : "includes_cache";
+        const breakdown = engine.estimateCost(
+          sc.model,
+          Number(sc.input_tokens) || 0,
+          Number(sc.output_tokens) || 0,
+          Number(sc.reasoning_tokens) || 0,
+          Number(sc.cached_input_tokens) || 0,
+          Number(sc.cache_creation_tokens) || 0,
+          Number(sc.cache_creation_1h_tokens) || 0,
+          convention,
+        );
+        const { model: _bm, ...breakdownFields } = breakdown;
+        return {
+          model: sc.model,
+          provider: sc.provider,
+          session_count: sc.session_count,
+          ...breakdownFields,
+        };
+      });
+
+      let totalCost = 0;
+      let totalInput = 0;
+      let totalOutput = 0;
+      let totalCached = 0;
+      let totalReasoning = 0;
+      let totalTokens = 0;
+      let totalSessions = 0;
+
+      for (const m of models) {
+        totalCost += m.total_cost;
+        totalInput += m.input_tokens;
+        totalOutput += m.output_tokens;
+        totalCached += m.cached_input_tokens;
+        totalReasoning += m.reasoning_tokens;
+        totalTokens += m.input_tokens + m.output_tokens + m.reasoning_tokens;
+        totalSessions += m.session_count;
+      }
+
+      res.json({
+        status: models.length > 0 ? "ok" : "no-data",
+        totalCost,
+        totalInput,
+        totalOutput,
+        totalCached,
+        totalReasoning,
+        totalTokens,
+        totalSessions,
+        modelCount: models.length,
+        models,
+        pricingSource: "litellm",
+        pricingUrl:
+          "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json",
+      });
     } catch (exc) {
       res
         .status(500)
@@ -736,9 +633,12 @@ export function startServer(options?: {
 
   // Start server
   return new Promise((resolve, reject) => {
-    const server = app.listen(port, () => {
+    const server = app.listen(Number(port), host, () => {
       console.log(`Rewind session viewer running at http://localhost:${port}`);
       console.log(`Serving UI at http://localhost:${port}/ui`);
+      if (publicUrl) {
+        console.log(`Public URL for sharing: ${publicUrl}`);
+      }
       console.log(`Data directory: ${dataDir}`);
       resolve({ port: Number(port), close: () => server.close() });
     });
