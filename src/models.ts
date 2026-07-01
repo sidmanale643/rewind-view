@@ -133,3 +133,67 @@ export interface GrepResult {
   match_count: number;
   snippets: string[];
 }
+
+export interface TranscriptMessage {
+  role: string;
+  text: string;
+  ts: string | null;
+  toolCalls?: TranscriptToolCall[];
+  toolOutputs?: TranscriptToolOutput[];
+}
+
+export interface TranscriptToolCall {
+  id?: string;
+  name: string;
+  args: Record<string, unknown> | string | null;
+  ts: string | null;
+}
+
+export interface TranscriptToolOutput {
+  id: string;
+  toolName: string;
+  output: string;
+  preview: string;
+  bytes: number;
+  ts: string | null;
+}
+
+export type HandoffTarget = "claude" | "codex";
+
+export interface HandoffOptions {
+  target: HandoffTarget;
+  messages?: number;
+  handoffDir?: string | null;
+  artifactDir?: string | null;
+}
+
+export interface HandoffPacket {
+  target: HandoffTarget;
+  markdown: string;
+  included_messages: number;
+  summary?: HandoffSummary;
+  handoff_dir?: string | null;
+  handoff_path?: string | null;
+  manifest_path?: string | null;
+  output_artifacts?: HandoffOutputArtifact[];
+}
+
+export interface HandoffOutputArtifact {
+  id: string;
+  tool_name: string;
+  path: string;
+  relative_path: string;
+  bytes: number;
+  message_index: number;
+  ts: string | null;
+}
+
+export interface HandoffSummary {
+  user_requests: string[];
+  actions_taken: string[];
+  files_touched: string[];
+  commands_run: string[];
+  validations: string[];
+  notable_errors: string[];
+  remaining_notes: string[];
+}
