@@ -5,7 +5,7 @@
 ```bash
 # Build and run the CLI
 npm run build                    # Compile TypeScript to dist/
-npm run serve                    # Run as CLI (rewind <command>)
+npm run rewind                   # Auto-index and start web UI
 
 # Index sessions (idempotent)
 rewind index
@@ -23,9 +23,9 @@ rewind grep "error.*timeout" --provider codex
 # Show session stats
 rewind info
 
-# Serve the web UI
+# Serve the web UI (auto-indexes)
 rewind serve
-# → http://localhost:3000/ui
+# → http://localhost:4820/ui
 ```
 
 ## Architecture
@@ -64,6 +64,24 @@ npm run dev        # Watch mode for development
 ```bash
 # The project has no configured tests
 # Run manually if you add them to package.json
+```
+
+### Deploy with nginx (reverse proxy)
+```bash
+# Install nginx (macOS)
+brew install nginx
+
+# Copy config to nginx
+cp nginx.conf /opt/homebrew/etc/nginx/nginx.conf
+
+# Start/restart nginx
+brew services restart nginx
+
+# Start rewind server on port 3000
+rewind serve --port 3000
+
+# Access via nginx at http://localhost/
+# Share links will use the nginx host automatically
 ```
 
 ## CLI usage patterns
@@ -112,7 +130,7 @@ npm run dev        # Watch mode for development
 2. Examine `src/connectors/claude.ts` to understand the parsing pattern
 3. Check `src/services/sessionStore.ts` for SQLite interaction details
 4. Look at `src/indexer.ts:256` to see adapter selection logic
-5. The web UI is at `http://localhost:3000/ui` after `rewind serve`
+5. The web UI is at `http://localhost:4820/ui` after `rewind serve`
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker

@@ -1,13 +1,13 @@
 # Rewind
 
-A standalone Node.js CLI and web UI for indexing and browsing AI assistant sessions from Claude, Codex, OpenCode, and Antigravity.
+A standalone Node.js CLI and web UI for indexing and browsing AI assistant sessions from Claude, Codex, Cursor, OpenCode, and Antigravity.
 
 Sessions are indexed into `~/.rewind/data/rewind.sqlite` and then searchable from anywhere.
 
 ## Quick start
 
 ```bash
-npx rewind-view
+npm run rewind
 ```
 
 That's it. This will:
@@ -23,34 +23,31 @@ Data is stored in `~/.rewind/data/` and persists across sessions.
 
 ## Installation
 
+### npm (recommended)
+
+```bash
+npm install
+npm run rewind
+```
+
 ### npx (zero install)
 
 ```bash
-npx rewind-view
+npx rewind-view serve
 ```
 
-### npm (global install)
+### Global install
 
 ```bash
 npm install -g rewind-view
-rewind
-```
-
-### From source
-
-```bash
-git clone <repo>
-cd continuum-viewer
-npm install
-npm run build
-rewind
+rewind serve
 ```
 
 ---
 
 ## Commands
 
-Running `rewind` with no arguments shows the banner, auto-indexes, and opens the web UI.
+Running `rewind` with no arguments defaults to `serve`.
 
 ### `rewind index`
 
@@ -67,20 +64,30 @@ rewind index --data-dir ./my-data     # custom data directory
 Options:
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--provider` | `all` | `claude`, `codex`, `antigravity`, `opencode`, or `all` |
+| `--provider` | `all` | `claude`, `codex`, `cursor`, `antigravity`, `opencode`, or `all` |
 | `--rebuild` | false | Re-index every session ignoring cached hashes |
 | `--discover-only` | false | Discover and record sessions without indexing |
 | `--data-dir` | `~/.rewind/data` | Storage directory |
 
 ### `rewind serve`
 
-Start the local web UI.
+Auto-index sessions and start the local web UI.
 
 ```bash
-rewind serve                          # http://localhost:3000/ui
+rewind serve                          # http://localhost:4820/ui
 rewind serve --port 8080
+rewind serve --host 0.0.0.0           # listen on all interfaces
+rewind serve --public-url http://192.168.1.5:4820
 rewind serve --data-dir ./my-data
 ```
+
+Options:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `4820` | Port to listen on |
+| `--host` | `0.0.0.0` | Host to bind to |
+| `--public-url` | _(none)_ | Public base URL for share links |
+| `--data-dir` | `~/.rewind/data` | Storage directory |
 
 ### `rewind search`
 
@@ -109,6 +116,33 @@ Show indexed session counts and storage stats.
 rewind info
 ```
 
+### `rewind handoff`
+
+Create a handoff bundle for continuing work in another assistant.
+
+```bash
+rewind handoff <session-id> --to claude
+rewind handoff <session-id> --to codex --messages 20
+rewind handoff <session-id> --to claude --print
+```
+
+Options:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--to` | required | Target assistant: `claude` or `codex` |
+| `--messages` | `all` | Number of recent messages to include (max: 100) |
+| `--handoff-dir` | auto | Directory for the handoff bundle |
+| `--print` | false | Print HANDOFF.md content to stdout |
+| `--no-artifacts` | false | Skip writing handoff bundle files |
+
+### `rewind doctor`
+
+Verify environment and database health.
+
+```bash
+rewind doctor
+```
+
 ---
 
 ## Session locations (auto-discovered)
@@ -117,6 +151,7 @@ rewind info
 |----------|-------------|
 | Claude | `~/.claude/projects/` |
 | Codex | `~/.codex/sessions/` |
+| Cursor | `~/.cursor/projects/` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Antigravity | `~/.gemini/antigravity/brain/` |
 
@@ -124,7 +159,14 @@ rewind info
 
 ## Data storage
 
-All data is stored in `~/.rewind/data/rewind.sqlite` by default. Override with `--data-dir` on any command or set `DATA_DIR` / `PORT` environment variables for the server.
+All data is stored in `~/.rewind/data/rewind.sqlite` by default. Override with `--data-dir` on any command or set these environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATA_DIR` | `~/.rewind/data` | Storage directory for SQLite database |
+| `PORT` | `4820` | Port for the web UI server |
+| `HOST` | `0.0.0.0` | Host for the web UI server |
+| `PUBLIC_URL` | _(none)_ | Public base URL for share links |
 
 ---
 
