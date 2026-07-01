@@ -40,9 +40,15 @@ function transcriptHash(transcript: string): string {
 function resumeCommandFor(
   provider: string,
   providerSessionId: string | null,
+  cwd?: string | null,
 ): string | null {
   if (!providerSessionId) return null;
-  if (provider === "claude") return `claude --resume ${providerSessionId}`;
+  if (provider === "claude") {
+    // Claude --resume only searches the current project directory,
+    // so include the cd command when cwd is known.
+    if (cwd) return `cd ${cwd} && claude --resume ${providerSessionId}`;
+    return `claude --resume ${providerSessionId}`;
+  }
   if (provider === "codex") return `codex resume ${providerSessionId}`;
   if (provider === "cursor") return null; // Cursor doesn't have a resume CLI command
   return null;
@@ -98,8 +104,28 @@ export class Indexer {
     if (sources.length === 0) return result;
 
     // Discover + parse all sessions, record them in SQLite
+    if (provider === Provider.CLAUDE) {
+      this.sessionStore.pruneMissingSources(
+        provider,
+        sources.map((source) => source.path),
+      );
+    }
+
     for (const source of sources) {
       try {
+        if (
+          this.sessionStore.isSourceUnchanged(
+            provider,
+            source.path,
+            source.mtimeNs,
+            source.sizeBytes,
+            force,
+          )
+        ) {
+          result.skipped++;
+          continue;
+        }
+
         const parsed = adapter.parse(source);
         const newHash = transcriptHash(parsed.transcriptText);
 
@@ -198,7 +224,7 @@ export class Indexer {
       cwd: row.cwd,
       lastMessageAt: row.session_last_message_at,
       sourcePath: row.source_path,
-      resumeCommand: resumeCommandFor(providerValue, providerSessionId),
+      resumeCommand: resumeCommandFor(providerValue, providerSessionId, row.cwd),
       snippet,
       model: row.model || null,
       totalTokens: row.total_tokens || null,
@@ -304,9 +330,11 @@ export class Indexer {
           "transcript.jsonl",
         );
         if (!fs.existsSync(transcriptPath)) return [];
+        if (!fs.statSync(transcriptPath).isFile()) return [];
         const content = fs.readFileSync(transcriptPath, "utf-8");
         return this.parseActionsFromContent(content, provider, sessionId);
       }
+      if (!fs.statSync(sourcePath).isFile()) return [];
       const content = fs.readFileSync(sourcePath, "utf-8");
       return this.parseActionsFromContent(content, provider, sessionId);
     } catch {

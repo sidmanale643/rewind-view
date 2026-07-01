@@ -103,7 +103,7 @@ export function minimalRecord(
   path: string,
   error: string,
 ): ParsedSession {
-  const stem = path.split("/").pop() || "unknown";
+  const stem = (path.split("/").pop() || "unknown").replace(/\.jsonl$/, "");
   const session: SessionRecord = {
     id: `${provider}:${stem}`,
     provider,

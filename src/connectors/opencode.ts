@@ -3,7 +3,7 @@
  * from the SQLite database (~/.local/share/opencode/opencode.db).
  */
 
-import { existsSync, statSync } from 'fs';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import Database from 'better-sqlite3';
 import { Provider, SourceFile, ParsedSession, SessionRecord } from '../models';
@@ -159,17 +159,17 @@ function extractTextFromParts(parts: PartRow[]): string {
 function sessionDataSize(dbPath: string, sessionId: string): number {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    const messages = (
+    const messageBytes = (
       db
-        .prepare(`SELECT COUNT(*) as n FROM message WHERE session_id = ?`)
+        .prepare(`SELECT COALESCE(SUM(LENGTH(data)), 0) as n FROM message WHERE session_id = ?`)
         .get(sessionId) as { n: number }
     ).n;
-    const parts = (
+    const partBytes = (
       db
-        .prepare(`SELECT COUNT(*) as n FROM part WHERE session_id = ?`)
+        .prepare(`SELECT COALESCE(SUM(LENGTH(data)), 0) as n FROM part WHERE session_id = ?`)
         .get(sessionId) as { n: number }
     ).n;
-    return messages * 256 + parts * 512;
+    return messageBytes + partBytes;
   } finally {
     db.close();
   }
@@ -207,8 +207,8 @@ export class OpenCodeAdapter {
       const virtualPath = `${this.dbPath}?session=${sessionId}`;
 
       try {
-        const stat = statSync(this.dbPath);
-        const mtimeNs = BigInt(Math.floor(stat.mtimeMs * 1_000_000));
+        const mtimeMs = Math.floor(session.time_updated || session.time_created || 0);
+        const mtimeNs = BigInt(mtimeMs) * 1_000_000n;
         const sizeBytes = sessionDataSize(this.dbPath, sessionId);
 
         files.push({

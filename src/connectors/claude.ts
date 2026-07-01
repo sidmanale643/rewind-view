@@ -155,7 +155,7 @@ function shouldSkipMessage(value: any, text: string): boolean {
 }
 
 function minimalRecord(path: string, error: string): ParsedSession {
-  const stem = path.split('/').pop() || 'unknown';
+  const stem = (path.split('/').pop() || 'unknown').replace(/\.jsonl$/, '');
   const session: SessionRecord = {
     id: `claude:${stem}`,
     provider: Provider.CLAUDE,
@@ -264,7 +264,7 @@ export class ClaudeAdapter {
     const fs = require('fs');
     const raw = fs.readFileSync(path, 'utf-8');
 
-    let providerSessionId = path.split('/').pop() || 'unknown';
+    let providerSessionId = (path.split('/').pop() || 'unknown').replace(/\.jsonl$/, '');
     let cwd: string | null = null;
     let createdAt: Date | null = null;
     let updatedAt: Date | null = null;

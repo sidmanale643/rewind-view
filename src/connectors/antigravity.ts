@@ -34,6 +34,7 @@ function loadMetadataJsonl(brainDir: string): any {
   const metadataPath = join(brainDir, 'task.md.metadata.json');
   if (existsSync(metadataPath)) {
     try {
+      if (!statSync(metadataPath).isFile()) return {};
       const content = readFileSync(metadataPath, 'utf-8');
       return JSON.parse(content);
     } catch {
@@ -49,6 +50,7 @@ function loadTranscript(brainDir: string): any[] {
 
   const entries: any[] = [];
   try {
+    if (!statSync(transcriptPath).isFile()) return [];
     const content = readFileSync(transcriptPath, 'utf-8');
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
@@ -159,6 +161,7 @@ export class AntigravityAdapter {
 
         try {
           const stat = statSync(transcriptPath);
+          if (!stat.isFile()) continue;
           files.push({
             provider: Provider.ANTIGRAVITY,
             path: normalizePath(join(root, entry.name)),
