@@ -7,7 +7,7 @@ Sessions are indexed into `~/.rewind/data/rewind.sqlite` and then searchable fro
 ## Quick start
 
 ```bash
-npm run rewind
+npx rewind-view
 ```
 
 That's it. This will:
@@ -23,24 +23,26 @@ Data is stored in `~/.rewind/data/` and persists across sessions.
 
 ## Installation
 
-### npm (recommended)
-
-```bash
-npm install
-npm run rewind
-```
-
 ### npx (zero install)
 
 ```bash
-npx rewind-view serve
+npx rewind-view
 ```
 
-### Global install
+### npm global install
 
 ```bash
 npm install -g rewind-view
-rewind serve
+rewind
+```
+
+### From source
+
+```bash
+git clone <repo-url>
+cd rewind-view
+npm install
+npm run rewind
 ```
 
 ---
