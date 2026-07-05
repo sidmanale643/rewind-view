@@ -1,8 +1,39 @@
-# Rewind
+# Rewind View
 
-A standalone Node.js CLI and web UI for indexing and browsing AI assistant sessions from Claude, Codex, Cursor, OpenCode, and Antigravity.
+Rewind View is a local search and browsing tool for your AI assistant sessions.
 
-Sessions are indexed into `~/.rewind/data/rewind.sqlite` and then searchable from anywhere.
+It indexes sessions from Claude, Codex, Cursor, OpenCode, and Antigravity into a local SQLite database. You can search old transcripts, browse session details, inspect usage, estimate costs, and create handoff bundles when you want to continue work in another assistant.
+
+Everything stays on your machine by default. Rewind stores its data in `~/.rewind/data/rewind.sqlite`.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Sessions</strong><br>
+      Search and browse indexed sessions across providers.<br><br>
+      <img src="assets/sessions.jpeg" alt="Sessions view">
+    </td>
+    <td width="50%">
+      <strong>Dashboard</strong><br>
+      See sessions, messages, token usage, models, providers, and top repos.<br><br>
+      <img src="assets/dashboard.jpeg" alt="Dashboard view">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>Cost</strong><br>
+      Estimate spend from indexed session usage and model pricing.<br><br>
+      <img src="assets/cost.jpeg" alt="Cost view">
+    </td>
+    <td width="50%">
+      <strong>Handoff</strong><br>
+      Create a handoff bundle so another assistant can continue from a past session.<br><br>
+      <img src="assets/handoff.jpeg" alt="Handoff view">
+    </td>
+  </tr>
+</table>
 
 ## Quick start
 
@@ -10,90 +41,100 @@ Sessions are indexed into `~/.rewind/data/rewind.sqlite` and then searchable fro
 npx rewind-view
 ```
 
-That's it. This will:
-- Display a welcome banner
-- Index all your AI sessions (first run) or check for updates (subsequent runs)
-- Show a summary of what was indexed
-- Open the web UI in your browser
-- Stay running until you press Ctrl+C
+On the first run, Rewind will:
 
-Data is stored in `~/.rewind/data/` and persists across sessions.
+- Find supported assistant session files on your machine.
+- Parse and index the sessions.
+- Store the index in `~/.rewind/data/`.
+- Open the web UI in your browser.
+- Keep the local server running until you press `Ctrl+C`.
 
----
+## Install
 
-## Installation
-
-### npx (zero install)
+### Run with npx
 
 ```bash
 npx rewind-view
 ```
 
-### npm global install
+### Install globally
 
 ```bash
 npm install -g rewind-view
 rewind
 ```
 
-### From source
+### Run from source
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/sidmanale643/rewind-view.git
 cd rewind-view
 npm install
 npm run rewind
 ```
 
----
+## What you can do
+
+- Search transcripts across Claude, Codex, Cursor, OpenCode, and Antigravity.
+- Browse session transcripts in a local web UI.
+- Filter sessions by provider.
+- Copy resume commands for providers that support them.
+- View a dashboard of sessions, models, token usage, and repo activity.
+- Estimate costs from indexed token usage.
+- Create handoff bundles for Claude or Codex.
+- Use CLI search and grep when you want results in the terminal.
+
+## How it works
+
+Rewind discovers session files from each supported provider and parses them into a common session format. It stores session metadata, transcript text, usage data, and source file information in SQLite.
+
+Search uses SQLite FTS5, so it works locally without sending your transcripts to a remote service. Rewind tracks source file size, modified time, and content hashes so later runs can skip sessions that have not changed.
 
 ## Commands
 
-Running `rewind` with no arguments defaults to `serve`.
-
-### `rewind index`
-
-Explicitly discover and index sessions.
+Running `rewind` with no arguments starts the local web UI.
 
 ```bash
-rewind index                          # index all providers
-rewind index --provider claude        # claude only
-rewind index --rebuild                # force re-index everything
-rewind index --discover-only          # record in SQLite, skip indexing
-rewind index --data-dir ./my-data     # custom data directory
+rewind
 ```
 
-Options:
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--provider` | `all` | `claude`, `codex`, `cursor`, `antigravity`, `opencode`, or `all` |
-| `--rebuild` | false | Re-index every session ignoring cached hashes |
-| `--discover-only` | false | Discover and record sessions without indexing |
-| `--data-dir` | `~/.rewind/data` | Storage directory |
-
-### `rewind serve`
-
-Auto-index sessions and start the local web UI.
+### Index sessions
 
 ```bash
-rewind serve                          # http://localhost:4820/ui
+rewind index
+rewind index --provider claude
+rewind index --rebuild
+rewind index --discover-only
+rewind index --data-dir ./my-data
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--provider` | `all` | Provider to index. Use `claude`, `codex`, `cursor`, `antigravity`, `opencode`, or `all`. |
+| `--rebuild` | `false` | Re-index every session. |
+| `--discover-only` | `false` | Record sessions in SQLite without marking them indexed. |
+| `--data-dir` | `~/.rewind/data` | Storage directory. |
+
+### Start the web UI
+
+```bash
+rewind serve
 rewind serve --port 8080
-rewind serve --host 0.0.0.0           # listen on all interfaces
+rewind serve --host 0.0.0.0
 rewind serve --public-url http://192.168.1.5:4820
 rewind serve --data-dir ./my-data
 ```
 
-Options:
+The default web UI URL is `http://localhost:4820/ui`.
+
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--port` | `4820` | Port to listen on |
-| `--host` | `0.0.0.0` | Host to bind to |
-| `--public-url` | _(none)_ | Public base URL for share links |
-| `--data-dir` | `~/.rewind/data` | Storage directory |
+| --- | --- | --- |
+| `--port` | `4820` | Port for the local server. |
+| `--host` | `0.0.0.0` | Host for the local server. |
+| `--public-url` | none | Public base URL for share links. |
+| `--data-dir` | `~/.rewind/data` | Storage directory. |
 
-### `rewind search`
-
-Full-text search over indexed sessions.
+### Search from the terminal
 
 ```bash
 rewind search "OAuth login"
@@ -101,26 +142,14 @@ rewind search "react hooks" --provider claude -k 10
 rewind search "deploy" --json
 ```
 
-### `rewind grep`
-
-Regex grep across session transcripts with context lines.
+### Grep transcripts
 
 ```bash
 rewind grep "useEffect"
 rewind grep "error.*timeout" --context 3 --provider codex
 ```
 
-### `rewind info`
-
-Show indexed session counts and storage stats.
-
-```bash
-rewind info
-```
-
-### `rewind handoff`
-
-Create a handoff bundle for continuing work in another assistant.
+### Create a handoff bundle
 
 ```bash
 rewind handoff <session-id> --to claude
@@ -128,49 +157,52 @@ rewind handoff <session-id> --to codex --messages 20
 rewind handoff <session-id> --to claude --print
 ```
 
-Options:
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--to` | required | Target assistant: `claude` or `codex` |
-| `--messages` | `all` | Number of recent messages to include (max: 100) |
-| `--handoff-dir` | auto | Directory for the handoff bundle |
-| `--print` | false | Print HANDOFF.md content to stdout |
-| `--no-artifacts` | false | Skip writing handoff bundle files |
+| --- | --- | --- |
+| `--to` | required | Target assistant. Use `claude` or `codex`. |
+| `--messages` | `all` | Number of recent messages to include. The maximum is 100. |
+| `--handoff-dir` | auto | Directory for the handoff bundle. |
+| `--print` | `false` | Print `HANDOFF.md` content to stdout. |
+| `--no-artifacts` | `false` | Skip writing handoff bundle files. |
 
-### `rewind doctor`
-
-Verify environment and database health.
+### Inspect the index
 
 ```bash
+rewind info
 rewind doctor
 ```
 
----
-
-## Session locations (auto-discovered)
+## Supported session locations
 
 | Provider | Default path |
-|----------|-------------|
+| --- | --- |
 | Claude | `~/.claude/projects/` |
 | Codex | `~/.codex/sessions/` |
 | Cursor | `~/.cursor/projects/` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Antigravity | `~/.gemini/antigravity/brain/` |
 
----
+## Configuration
 
-## Data storage
-
-All data is stored in `~/.rewind/data/rewind.sqlite` by default. Override with `--data-dir` on any command or set these environment variables:
+You can pass `--data-dir` to any command, or set these environment variables.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `DATA_DIR` | `~/.rewind/data` | Storage directory for SQLite database |
-| `PORT` | `4820` | Port for the web UI server |
-| `HOST` | `0.0.0.0` | Host for the web UI server |
-| `PUBLIC_URL` | _(none)_ | Public base URL for share links |
+| --- | --- | --- |
+| `DATA_DIR` | `~/.rewind/data` | Storage directory for the SQLite database. |
+| `PORT` | `4820` | Port for the web UI server. |
+| `HOST` | `0.0.0.0` | Host for the web UI server. |
+| `PUBLIC_URL` | none | Public base URL for share links. |
 
----
+## Requirements
+
+- Node.js 18 or newer.
+- Local session files from at least one supported provider.
+
+## Repository
+
+Source code and issues are on GitHub:
+
+https://github.com/sidmanale643/rewind-view
 
 ## License
 
